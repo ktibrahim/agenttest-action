@@ -1,0 +1,47 @@
+name: 'AgentTest'
+description: 'AI agent cost guardrails for CI/CD. Catches runaway executions and financial regressions before release.'
+author: 'AgentTest'
+
+branding:
+  icon: 'shield'
+  color: 'blue'
+
+inputs:
+  api-key:
+    description: 'Your AgentTest API key (stored as a GitHub secret)'
+    required: true
+  config-path:
+    description: 'Path to agenttest.config.yml'
+    required: false
+    default: './agenttest.config.yml'
+  trigger-mode:
+    description: 'When to run: "always", "label" (requires agenttest-run label), or "ready" (Ready for Review only)'
+    required: false
+    default: 'always'
+  slack-webhook:
+    description: 'Slack Webhook URL for anomaly alerts'
+    required: false
+  jira-api-token:
+    description: 'Jira API Token'
+    required: false
+  jira-email:
+    description: 'Jira account email'
+    required: false
+  jira-domain:
+    description: 'Jira domain (e.g. acme.atlassian.net)'
+    required: false
+  jira-project-key:
+    description: 'Jira project key (e.g. SEC or ENG)'
+    required: false
+
+outputs:
+  status:
+    description: 'Evaluation result: pass, fail, calibration, or skipped'
+  median-cost:
+    description: 'Median cost in USD across Monte Carlo runs'
+  z-score:
+    description: 'Z-Score of the cost anomaly'
+
+runs:
+  using: 'node20'
+  main: 'dist/index.js'

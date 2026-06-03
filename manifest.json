@@ -1,0 +1,31 @@
+{
+  "generatedAt": "2026-06-03T20:25:03.806Z",
+  "source": "packages/action",
+  "purpose": "Public GitHub Marketplace Action thin-client release bundle",
+  "files": {
+    "LICENSE": {
+      "bytes": 298,
+      "sha256": "84e6cb28665b357a3486beb93b778b8fd417bc8dd3698d1c323987cfed8304f4"
+    },
+    "README.md": {
+      "bytes": 2771,
+      "sha256": "64da4bf3784a2c52510ce3f1b4c6729ee2131b38687500a29385ed4e7087102a"
+    },
+    "RELEASE_NOTES.md": {
+      "bytes": 308,
+      "sha256": "c6fc7bf7022ca34eab706e27f54239ff1cc16947d1db954f8e0423785e9a1081"
+    },
+    "action.yml": {
+      "bytes": 1308,
+      "sha256": "35d8db78eea3dbec7788c7432d99d457ed867ea17a7c2ed937c71940fbb3658a"
+    },
+    "dist/index.js": {
+      "bytes": 1055881,
+      "sha256": "f9283a69e8f7c20afa51ee801d09fc543921138551341c1fff2c2edae59d6ffc"
+    }
+  },
+  "boundary": {
+    "privateProductCodeStaysIn": "private AgentTest monorepo and private backend",
+    "publicActionContainsOnly": "metadata-signing client, action metadata, customer README, license, release notes"
+  }
+}
