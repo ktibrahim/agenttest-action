@@ -7,9 +7,12 @@ branding:
   color: 'blue'
 
 inputs:
+  service-key:
+    description: 'Repository-scoped AgentTest service key (store as a GitHub Actions secret)'
+    required: false
   api-key:
-    description: 'Your AgentTest API key (stored as a GitHub secret)'
-    required: true
+    description: 'Deprecated alias for service-key; remove after migrating the workflow'
+    required: false
   config-path:
     description: 'Path to agenttest.config.yml'
     required: false
@@ -18,22 +21,6 @@ inputs:
     description: 'When to run: "always", "label" (requires agenttest-run label), or "ready" (Ready for Review only)'
     required: false
     default: 'always'
-  slack-webhook:
-    description: 'Slack Webhook URL for anomaly alerts'
-    required: false
-  jira-api-token:
-    description: 'Jira API Token'
-    required: false
-  jira-email:
-    description: 'Jira account email'
-    required: false
-  jira-domain:
-    description: 'Jira domain (e.g. acme.atlassian.net)'
-    required: false
-  jira-project-key:
-    description: 'Jira project key (e.g. SEC or ENG)'
-    required: false
-
 outputs:
   status:
     description: 'Evaluation result: pass, fail, calibration, or skipped'
@@ -43,5 +30,5 @@ outputs:
     description: 'Z-Score of the cost anomaly'
 
 runs:
-  using: 'node20'
+  using: 'node24'
   main: 'dist/index.js'

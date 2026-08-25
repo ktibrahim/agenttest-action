@@ -2,7 +2,7 @@
 
 AgentTest is a CI/CD cost guardrail for AI agents.
 
-This public repository is intentionally a thin GitHub Action client. It runs inside your GitHub Actions workflow, executes the agent command you configure, collects usage metadata, signs that metadata with your AgentTest repository API key, and sends the signed metadata to the private AgentTest backend API.
+This public repository is intentionally a thin GitHub Action client. It runs inside your workflow, executes the configured command, collects cost-only usage metadata through the local `@agenttest/sdk` collector, signs it with a repository service key, and sends it to the private AgentTest API. It is installed directly from its repository; AgentTest is not pursuing a Marketplace listing in this phase.
 
 AgentTest's product source code, private API service, web app, cloud deployment code, tests, internal documentation, pricing logic, authorization, billing, data storage, and operational controls are not part of this public Action repository.
 
@@ -29,15 +29,15 @@ jobs:
   cost-guard:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@<reviewed-immutable-sha>
       - uses: <GITHUB_ORG>/agenttest-action@v1
         with:
-          api-key: ${{ secrets.AGENTTEST_API_KEY }}
+          service-key: ${{ secrets.AGENTTEST_SERVICE_KEY }}
           config-path: "./agenttest.config.yml"
           trigger-mode: "ready"
 ```
 
-Store `AGENTTEST_API_KEY` only as a GitHub Actions secret.
+Store `AGENTTEST_SERVICE_KEY` only as a GitHub Actions secret.
 
 ## Configuration
 
@@ -45,6 +45,8 @@ Create `agenttest.config.yml` in your repository root:
 
 ```yaml
 agent:
+  # Safe metadata label. The command and prompt remain in this runner.
+  name: sales-agent
   command: "npm run agent"
   prompt: "Summarize the latest sales report"
   framework: langchain
@@ -59,20 +61,18 @@ server:
   endpoint: https://api.agenttest.dev
 ```
 
-Your agent command must emit JSON usage metadata to stdout. AgentTest passes `--prompt <prompt> --agenttest-output json` to the command.
+Your command reads its test input from `AGENTTEST_PROMPT` and reports provider usage with
+`@agenttest/sdk`. The SDK accepts only model/token/tool-count metadata and communicates only with
+the short-lived collector on `127.0.0.1`.
 
 ## Inputs
 
 | Input | Required | Description |
 | --- | --- | --- |
-| `api-key` | Yes | AgentTest repository API key, passed from `secrets.AGENTTEST_API_KEY`. |
+| `service-key` | Yes | Repository-scoped service key, passed from `secrets.AGENTTEST_SERVICE_KEY`. |
+| `api-key` | No | Deprecated compatibility alias for `service-key`. |
 | `config-path` | No | Path to `agenttest.config.yml`. Defaults to `./agenttest.config.yml`. |
 | `trigger-mode` | No | `ready`, `label`, or `always`. Use `ready` for first rollout. |
-| `slack-webhook` | No | Optional Slack webhook for client-side notifications. |
-| `jira-api-token` | No | Optional Jira token for client-side ticket creation. |
-| `jira-email` | No | Optional Jira account email. |
-| `jira-domain` | No | Optional Jira domain. |
-| `jira-project-key` | No | Optional Jira project key. |
 
 ## Outputs
 

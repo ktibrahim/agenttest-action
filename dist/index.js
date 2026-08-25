@@ -10,11 +10,12 @@ var __require = /* @__PURE__ */ ((x) => typeof require !== "undefined" ? require
   if (typeof require !== "undefined") return require.apply(this, arguments);
   throw Error('Dynamic require of "' + x + '" is not supported');
 });
-var __esm = (fn, res) => function __init() {
-  return fn && (res = (0, fn[__getOwnPropNames(fn)[0]])(fn = 0)), res;
-};
 var __commonJS = (cb, mod) => function __require2() {
-  return mod || (0, cb[__getOwnPropNames(cb)[0]])((mod = { exports: {} }).exports, mod), mod.exports;
+  try {
+    return mod || (0, cb[__getOwnPropNames(cb)[0]])((mod = { exports: {} }).exports, mod), mod.exports;
+  } catch (e) {
+    throw mod = 0, e;
+  }
 };
 var __export = (target, all) => {
   for (var name in all)
@@ -1932,7 +1933,11 @@ var require_request = __commonJS({
           } else if (typeof val[i] === "object") {
             throw new InvalidArgumentError(`invalid ${key} header`);
           } else {
-            arr.push(`${val[i]}`);
+            const str = `${val[i]}`;
+            if (!isValidHeaderValue(str)) {
+              throw new InvalidArgumentError(`invalid ${key} header`);
+            }
+            arr.push(str);
           }
         }
         val = arr;
@@ -1944,6 +1949,9 @@ var require_request = __commonJS({
         val = "";
       } else {
         val = `${val}`;
+        if (!isValidHeaderValue(val)) {
+          throw new InvalidArgumentError(`invalid ${key} header`);
+        }
       }
       if (headerName === "host") {
         if (request2.host !== null) {
@@ -2065,6 +2073,7 @@ var require_dispatcher_base = __commonJS({
       }
       get webSocketOptions() {
         return {
+          maxFragments: this[kWebSocketOptions].maxFragments ?? 131072,
           maxPayloadSize: this[kWebSocketOptions].maxPayloadSize ?? 128 * 1024 * 1024
         };
       }
@@ -5673,6 +5682,7 @@ var require_client_h1 = __commonJS({
       RequestContentLengthMismatchError,
       ResponseContentLengthMismatchError,
       RequestAbortedError,
+      InvalidArgumentError,
       HeadersTimeoutError,
       HeadersOverflowError,
       SocketError,
@@ -5719,6 +5729,9 @@ var require_client_h1 = __commonJS({
     var FastBuffer = Buffer[Symbol.species];
     var addListener = util.addListener;
     var removeAllListeners = util.removeAllListeners;
+    var kIdleSocketValidation = /* @__PURE__ */ Symbol("kIdleSocketValidation");
+    var kIdleSocketValidationTimeout = /* @__PURE__ */ Symbol("kIdleSocketValidationTimeout");
+    var kSocketUsed = /* @__PURE__ */ Symbol("kSocketUsed");
     var extractBody;
     async function lazyllhttp() {
       const llhttpWasmData = process.env.JEST_WORKER_ID ? require_llhttp_wasm() : void 0;
@@ -5881,23 +5894,54 @@ var require_client_h1 = __commonJS({
             currentBufferRef = null;
           }
           const offset = llhttp.llhttp_get_error_pos(this.ptr) - currentBufferPtr;
-          if (ret === constants3.ERROR.PAUSED_UPGRADE) {
-            this.onUpgrade(data.slice(offset));
-          } else if (ret === constants3.ERROR.PAUSED) {
-            this.paused = true;
-            socket.unshift(data.slice(offset));
-          } else if (ret !== constants3.ERROR.OK) {
-            const ptr = llhttp.llhttp_get_error_reason(this.ptr);
-            let message = "";
-            if (ptr) {
-              const len = new Uint8Array(llhttp.memory.buffer, ptr).indexOf(0);
-              message = "Response does not match the HTTP/1.1 protocol (" + Buffer.from(llhttp.memory.buffer, ptr, len).toString() + ")";
+          if (ret !== constants3.ERROR.OK) {
+            const body = data.subarray(offset);
+            if (ret === constants3.ERROR.PAUSED_UPGRADE) {
+              this.onUpgrade(body);
+            } else if (ret === constants3.ERROR.PAUSED) {
+              this.paused = true;
+              socket.unshift(body);
+            } else {
+              throw this.createError(ret, body);
             }
-            throw new HTTPParserError(message, constants3.ERROR[ret], data.slice(offset));
           }
         } catch (err) {
           util.destroy(socket, err);
         }
+      }
+      finish() {
+        assert(currentParser === null);
+        assert(this.ptr != null);
+        assert(!this.paused);
+        const { llhttp } = this;
+        let ret;
+        try {
+          currentParser = this;
+          ret = llhttp.llhttp_finish(this.ptr);
+        } finally {
+          currentParser = null;
+        }
+        if (ret === constants3.ERROR.OK) {
+          return null;
+        }
+        if (ret === constants3.ERROR.PAUSED || ret === constants3.ERROR.PAUSED_UPGRADE) {
+          this.paused = true;
+          return null;
+        }
+        return this.createError(ret, EMPTY_BUF);
+      }
+      createError(ret, data) {
+        const { llhttp, contentLength, bytesRead } = this;
+        if (contentLength && bytesRead !== parseInt(contentLength, 10)) {
+          return new ResponseContentLengthMismatchError();
+        }
+        const ptr = llhttp.llhttp_get_error_reason(this.ptr);
+        let message = "";
+        if (ptr) {
+          const len = new Uint8Array(llhttp.memory.buffer, ptr).indexOf(0);
+          message = "Response does not match the HTTP/1.1 protocol (" + Buffer.from(llhttp.memory.buffer, ptr, len).toString() + ")";
+        }
+        return new HTTPParserError(message, constants3.ERROR[ret], data);
       }
       destroy() {
         assert(this.ptr != null);
@@ -5916,6 +5960,10 @@ var require_client_h1 = __commonJS({
       onMessageBegin() {
         const { socket, client } = this;
         if (socket.destroyed) {
+          return -1;
+        }
+        if (client[kRunning] === 0) {
+          util.destroy(socket, new SocketError("bad response", util.getSocketInfo(socket)));
           return -1;
         }
         const request2 = client[kQueue][client[kRunningIdx]];
@@ -5995,6 +6043,10 @@ var require_client_h1 = __commonJS({
       onHeadersComplete(statusCode, upgrade, shouldKeepAlive) {
         const { client, socket, headers, statusText } = this;
         if (socket.destroyed) {
+          return -1;
+        }
+        if (client[kRunning] === 0) {
+          util.destroy(socket, new SocketError("bad response", util.getSocketInfo(socket)));
           return -1;
         }
         const request2 = client[kQueue][client[kRunningIdx]];
@@ -6122,6 +6174,7 @@ var require_client_h1 = __commonJS({
         }
         request2.onComplete(headers);
         client[kQueue][client[kRunningIdx]++] = null;
+        socket[kSocketUsed] = true;
         if (socket[kWriting]) {
           assert(client[kRunning] === 0);
           util.destroy(socket, new InformationalError("reset"));
@@ -6165,12 +6218,19 @@ var require_client_h1 = __commonJS({
       socket[kWriting] = false;
       socket[kReset] = false;
       socket[kBlocking] = false;
+      socket[kIdleSocketValidation] = 0;
+      socket[kIdleSocketValidationTimeout] = null;
+      socket[kSocketUsed] = false;
       socket[kParser] = new Parser(client, socket, llhttpInstance);
       addListener(socket, "error", function(err) {
         assert(err.code !== "ERR_TLS_CERT_ALTNAME_INVALID");
         const parser = this[kParser];
         if (err.code === "ECONNRESET" && parser.statusCode && !parser.shouldKeepAlive) {
-          parser.onMessageComplete();
+          const parserErr = parser.finish();
+          if (parserErr) {
+            this[kError] = parserErr;
+            this[kClient][kOnError](parserErr);
+          }
           return;
         }
         this[kError] = err;
@@ -6185,7 +6245,10 @@ var require_client_h1 = __commonJS({
       addListener(socket, "end", function() {
         const parser = this[kParser];
         if (parser.statusCode && !parser.shouldKeepAlive) {
-          parser.onMessageComplete();
+          const parserErr = parser.finish();
+          if (parserErr) {
+            util.destroy(this, parserErr);
+          }
           return;
         }
         util.destroy(this, new SocketError("other side closed", util.getSocketInfo(this)));
@@ -6193,9 +6256,10 @@ var require_client_h1 = __commonJS({
       addListener(socket, "close", function() {
         const client2 = this[kClient];
         const parser = this[kParser];
+        clearIdleSocketValidation(this);
         if (parser) {
           if (!this[kError] && parser.statusCode && !parser.shouldKeepAlive) {
-            parser.onMessageComplete();
+            this[kError] = parser.finish() || this[kError];
           }
           this[kParser].destroy();
           this[kParser] = null;
@@ -6244,7 +6308,7 @@ var require_client_h1 = __commonJS({
           return socket.destroyed;
         },
         busy(request2) {
-          if (socket[kWriting] || socket[kReset] || socket[kBlocking]) {
+          if (socket[kWriting] || socket[kReset] || socket[kBlocking] || socket[kIdleSocketValidation] === 1) {
             return true;
           }
           if (request2) {
@@ -6262,6 +6326,24 @@ var require_client_h1 = __commonJS({
         }
       };
     }
+    function clearIdleSocketValidation(socket) {
+      if (socket[kIdleSocketValidationTimeout]) {
+        clearTimeout(socket[kIdleSocketValidationTimeout]);
+        socket[kIdleSocketValidationTimeout] = null;
+      }
+      socket[kIdleSocketValidation] = 0;
+    }
+    function scheduleIdleSocketValidation(client, socket) {
+      socket[kIdleSocketValidation] = 1;
+      socket[kIdleSocketValidationTimeout] = setTimeout(() => {
+        socket[kIdleSocketValidationTimeout] = null;
+        socket[kIdleSocketValidation] = 2;
+        if (client[kSocket] === socket && !socket.destroyed) {
+          client[kResume]();
+        }
+      }, 0);
+      socket[kIdleSocketValidationTimeout].unref?.();
+    }
     function resumeH1(client) {
       const socket = client[kSocket];
       if (socket && !socket.destroyed) {
@@ -6273,6 +6355,29 @@ var require_client_h1 = __commonJS({
         } else if (socket[kNoRef] && socket.ref) {
           socket.ref();
           socket[kNoRef] = false;
+        }
+        if (client[kRunning] === 0 && client[kPending] > 0 && socket[kSocketUsed]) {
+          if (socket[kIdleSocketValidation] === 0) {
+            scheduleIdleSocketValidation(client, socket);
+            socket[kParser].readMore();
+            if (socket.destroyed) {
+              return;
+            }
+            return;
+          }
+          if (socket[kIdleSocketValidation] === 1) {
+            socket[kParser].readMore();
+            if (socket.destroyed) {
+              return;
+            }
+            return;
+          }
+        }
+        if (client[kRunning] === 0) {
+          socket[kParser].readMore();
+          if (socket.destroyed) {
+            return;
+          }
         }
         if (client[kSize] === 0) {
           if (socket[kParser].timeoutType !== TIMEOUT_KEEP_ALIVE) {
@@ -6304,8 +6409,16 @@ var require_client_h1 = __commonJS({
         }
         body = bodyStream.stream;
         contentLength = bodyStream.length;
-      } else if (util.isBlobLike(body) && request2.contentType == null && body.type) {
-        headers.push("content-type", body.type);
+      } else if (util.isBlobLike(body) && request2.contentType == null) {
+        const contentType = body.type;
+        if (contentType) {
+          const contentTypeValue = `${contentType}`;
+          if (!util.isValidHeaderValue(contentTypeValue)) {
+            util.errorRequest(client, request2, new InvalidArgumentError("invalid content-type header"));
+            return false;
+          }
+          headers.push("content-type", contentTypeValue);
+        }
       }
       if (body && typeof body.read === "function") {
         body.read(0);
@@ -6326,6 +6439,7 @@ var require_client_h1 = __commonJS({
         process.emitWarning(new RequestContentLengthMismatchError());
       }
       const socket = client[kSocket];
+      clearIdleSocketValidation(socket);
       const abort = (err) => {
         if (request2.aborted || request2.completed) {
           return;
@@ -8856,6 +8970,24 @@ var require_retry_handler = __commonJS({
       const current = Date.now();
       return new Date(retryAfter).getTime() - current;
     }
+    function validatePartialResponseContentLength(headers, range, statusCode, retryCount) {
+      const contentLength = headers["content-length"];
+      if (contentLength == null) {
+        return null;
+      }
+      if (!Number.isFinite(range.start) || !Number.isFinite(range.end)) {
+        return null;
+      }
+      const length = Number(contentLength);
+      const expectedLength = range.end - range.start + 1;
+      if (!Number.isFinite(length) || length !== expectedLength) {
+        return new RequestRetryError("Content-Length mismatch", statusCode, {
+          headers,
+          data: { count: retryCount }
+        });
+      }
+      return null;
+    }
     var RetryHandler = class _RetryHandler {
       constructor(opts, handlers) {
         const { retryOptions, ...dispatchOpts } = opts;
@@ -9028,6 +9160,11 @@ var require_retry_handler = __commonJS({
             );
             return false;
           }
+          const contentLengthError = validatePartialResponseContentLength(headers, contentRange, statusCode, this.retryCount);
+          if (contentLengthError != null) {
+            this.abort(contentLengthError);
+            return false;
+          }
           const { start, size, end = size - 1 } = contentRange;
           assert(this.start === start, "content-range mismatch");
           assert(this.end == null || this.end === end, "content-range mismatch");
@@ -9044,6 +9181,11 @@ var require_retry_handler = __commonJS({
                 resume,
                 statusMessage
               );
+            }
+            const contentLengthError = validatePartialResponseContentLength(headers, range, statusCode, this.retryCount);
+            if (contentLengthError != null) {
+              this.abort(contentLengthError);
+              return false;
             }
             const { start, size, end = size - 1 } = range;
             assert(
@@ -15890,14 +16032,48 @@ var require_util6 = __commonJS({
       for (let i = 0; i < path6.length; ++i) {
         const code = path6.charCodeAt(i);
         if (code < 32 || // exclude CTLs (0-31)
-        code === 127 || // DEL
+        code > 126 || // exclude DEL and non-ascii
         code === 59) {
           throw new Error("Invalid cookie path");
         }
       }
     }
+    function isLetterOrDigit(code) {
+      return code >= 48 && code <= 57 || // 0-9
+      code >= 65 && code <= 90 || // A-Z
+      code >= 97 && code <= 122;
+    }
     function validateCookieDomain(domain) {
-      if (domain.startsWith("-") || domain.endsWith(".") || domain.endsWith("-")) {
+      if (domain === " ") {
+        return;
+      }
+      if (domain.length > 255) {
+        throw new Error("Invalid cookie domain");
+      }
+      let labelLength = 0;
+      for (let i = 0; i < domain.length; ++i) {
+        const code = domain.charCodeAt(i);
+        if (code === 46) {
+          if (labelLength === 0) {
+            throw new Error("Invalid cookie domain");
+          }
+          if (domain.charCodeAt(i - 1) === 45) {
+            throw new Error("Invalid cookie domain");
+          }
+          labelLength = 0;
+          continue;
+        }
+        if (labelLength === 0 && !isLetterOrDigit(code)) {
+          throw new Error("Invalid cookie domain");
+        }
+        if (!isLetterOrDigit(code) && code !== 45) {
+          throw new Error("Invalid cookie domain");
+        }
+        if (++labelLength > 63) {
+          throw new Error("Invalid cookie domain");
+        }
+      }
+      if (labelLength === 0 || domain.charCodeAt(domain.length - 1) === 45) {
         throw new Error("Invalid cookie domain");
       }
     }
@@ -15980,7 +16156,11 @@ var require_util6 = __commonJS({
           throw new Error("Invalid unparsed");
         }
         const [key, ...value] = part.split("=");
-        out.push(`${key.trim()}=${value.join("=")}`);
+        const trimmedKey = key.trim();
+        const joinedValue = value.join("=");
+        validateCookieName(trimmedKey);
+        validateCookieValue(joinedValue);
+        out.push(`${trimmedKey}=${joinedValue}`);
       }
       return out.join("; ");
     }
@@ -16110,18 +16290,14 @@ var require_parse = __commonJS({
       } else if (attributeNameLowercase === "httponly") {
         cookieAttributeList.httpOnly = true;
       } else if (attributeNameLowercase === "samesite") {
-        let enforcement = "Default";
         const attributeValueLowercase = attributeValue.toLowerCase();
-        if (attributeValueLowercase.includes("none")) {
-          enforcement = "None";
+        if (attributeValueLowercase === "none") {
+          cookieAttributeList.sameSite = "None";
+        } else if (attributeValueLowercase === "strict") {
+          cookieAttributeList.sameSite = "Strict";
+        } else if (attributeValueLowercase === "lax") {
+          cookieAttributeList.sameSite = "Lax";
         }
-        if (attributeValueLowercase.includes("strict")) {
-          enforcement = "Strict";
-        }
-        if (attributeValueLowercase.includes("lax")) {
-          enforcement = "Lax";
-        }
-        cookieAttributeList.sameSite = enforcement;
       } else {
         cookieAttributeList.unparsed ??= [];
         cookieAttributeList.unparsed.push(`${attributeName}=${attributeValue}`);
@@ -17143,6 +17319,10 @@ var require_receiver = __commonJS({
     var { closeWebSocketConnection } = require_connection();
     var { PerMessageDeflate } = require_permessage_deflate();
     var { MessageSizeExceededError } = require_errors();
+    function failWebsocketConnectionWithCode(ws, code, reason) {
+      closeWebSocketConnection(ws, code, reason, Buffer.byteLength(reason));
+      failWebsocketConnection(ws, reason);
+    }
     var ByteParser = class extends Writable {
       #buffers = [];
       #fragmentsBytes = 0;
@@ -17154,16 +17334,19 @@ var require_receiver = __commonJS({
       /** @type {Map<string, PerMessageDeflate>} */
       #extensions;
       /** @type {number} */
+      #maxFragments;
+      /** @type {number} */
       #maxPayloadSize;
       /**
        * @param {import('./websocket').WebSocket} ws
        * @param {Map<string, string>|null} extensions
-       * @param {{ maxPayloadSize?: number }} [options]
+       * @param {{ maxFragments?: number, maxPayloadSize?: number }} [options]
        */
       constructor(ws, extensions, options = {}) {
         super();
         this.ws = ws;
         this.#extensions = extensions == null ? /* @__PURE__ */ new Map() : extensions;
+        this.#maxFragments = options.maxFragments ?? 0;
         this.#maxPayloadSize = options.maxPayloadSize ?? 0;
         if (this.#extensions.has("permessage-deflate")) {
           this.#extensions.set("permessage-deflate", new PerMessageDeflate(extensions, options));
@@ -17180,8 +17363,8 @@ var require_receiver = __commonJS({
         this.run(callback);
       }
       #validatePayloadLength() {
-        if (this.#maxPayloadSize > 0 && !isControlFrame(this.#info.opcode) && this.#info.payloadLength > this.#maxPayloadSize) {
-          failWebsocketConnection(this.ws, "Payload size exceeds maximum allowed size");
+        if (this.#maxPayloadSize > 0 && !isControlFrame(this.#info.opcode) && this.#info.payloadLength + this.#fragmentsBytes > this.#maxPayloadSize) {
+          failWebsocketConnectionWithCode(this.ws, 1009, "Payload size exceeds maximum allowed size");
           return false;
         }
         return true;
@@ -17297,9 +17480,11 @@ var require_receiver = __commonJS({
               this.#state = parserStates.INFO;
             } else {
               if (!this.#info.compressed) {
-                this.writeFragments(body);
+                if (!this.writeFragments(body)) {
+                  return;
+                }
                 if (this.#maxPayloadSize > 0 && this.#fragmentsBytes > this.#maxPayloadSize) {
-                  failWebsocketConnection(this.ws, new MessageSizeExceededError().message);
+                  failWebsocketConnectionWithCode(this.ws, 1009, new MessageSizeExceededError().message);
                   return;
                 }
                 if (!this.#info.fragmented && this.#info.fin) {
@@ -17312,12 +17497,15 @@ var require_receiver = __commonJS({
                   this.#info.fin,
                   (error2, data) => {
                     if (error2) {
-                      failWebsocketConnection(this.ws, error2.message);
+                      const code = error2 instanceof MessageSizeExceededError ? 1009 : 1007;
+                      failWebsocketConnectionWithCode(this.ws, code, error2.message);
                       return;
                     }
-                    this.writeFragments(data);
+                    if (!this.writeFragments(data)) {
+                      return;
+                    }
                     if (this.#maxPayloadSize > 0 && this.#fragmentsBytes > this.#maxPayloadSize) {
-                      failWebsocketConnection(this.ws, new MessageSizeExceededError().message);
+                      failWebsocketConnectionWithCode(this.ws, 1009, new MessageSizeExceededError().message);
                       return;
                     }
                     if (!this.#info.fin) {
@@ -17375,8 +17563,13 @@ var require_receiver = __commonJS({
         return buffer;
       }
       writeFragments(fragment) {
+        if (this.#maxFragments > 0 && this.#fragments.length === this.#maxFragments) {
+          failWebsocketConnectionWithCode(this.ws, 1008, "Too many message fragments");
+          return false;
+        }
         this.#fragmentsBytes += fragment.length;
         this.#fragments.push(fragment);
+        return true;
       }
       consumeFragments() {
         const fragments = this.#fragments;
@@ -17826,8 +18019,11 @@ var require_websocket = __commonJS({
        */
       #onConnectionEstablished(response, parsedExtensions) {
         this[kResponse] = response;
-        const maxPayloadSize = this[kController]?.dispatcher?.webSocketOptions?.maxPayloadSize;
+        const webSocketOptions = this[kController]?.dispatcher?.webSocketOptions;
+        const maxFragments = webSocketOptions?.maxFragments;
+        const maxPayloadSize = webSocketOptions?.maxPayloadSize;
         const parser = new ByteParser(this, parsedExtensions, {
+          maxFragments,
           maxPayloadSize
         });
         parser.on("drain", onParserDrain);
@@ -19540,232 +19736,6 @@ var require_dist = __commonJS({
         return `"${str.replace(QUOTE_REGEXP, "\\$&")}"`;
       throw new TypeError(`Invalid parameter value: ${str}`);
     }
-  }
-});
-
-// ../shared/dist/types.js
-var DEFAULT_CONFIG, CircuitBreakerError, UpstreamError;
-var init_types = __esm({
-  "../shared/dist/types.js"() {
-    "use strict";
-    DEFAULT_CONFIG = {
-      maxTokensPerRun: 5e5,
-      maxDurationSec: 300,
-      numRuns: 5
-    };
-    CircuitBreakerError = class extends Error {
-      type;
-      actual;
-      limit;
-      constructor(type, actual, limit) {
-        super(type === "token_cap" ? `Hard cap exceeded: ${actual} tokens (limit: ${limit})` : `Timeout exceeded: ${actual.toFixed(1)}s (limit: ${limit}s)`);
-        this.type = type;
-        this.actual = actual;
-        this.limit = limit;
-        this.name = "CircuitBreakerError";
-      }
-    };
-    UpstreamError = class extends Error {
-      statusCode;
-      constructor(statusCode) {
-        super(`Upstream LLM provider unavailable (HTTP ${statusCode})`);
-        this.statusCode = statusCode;
-        this.name = "UpstreamError";
-      }
-    };
-  }
-});
-
-// ../shared/dist/hmac.js
-import crypto2 from "node:crypto";
-function signPayload(payload, apiKey) {
-  return crypto2.createHmac("sha256", apiKey).update(JSON.stringify(payload)).digest("hex");
-}
-function createSignedBody(payload, apiKey) {
-  return {
-    ...payload,
-    signature: signPayload(payload, apiKey)
-  };
-}
-var init_hmac = __esm({
-  "../shared/dist/hmac.js"() {
-    "use strict";
-  }
-});
-
-// ../shared/dist/index.js
-var init_dist = __esm({
-  "../shared/dist/index.js"() {
-    "use strict";
-    init_types();
-    init_hmac();
-  }
-});
-
-// src/circuit-breaker.ts
-async function executeWithCircuitBreaker(config, executeAgent2) {
-  try {
-    const result = await executeAgent2(config.agentCommand, config.prompt);
-    const totalTokens = result.usageBreakdown.reduce(
-      (sum, u) => sum + u.promptTokens + u.completionTokens,
-      0
-    );
-    if (totalTokens > config.maxTokensPerRun) {
-      throw new CircuitBreakerError("token_cap", totalTokens, config.maxTokensPerRun);
-    }
-    if (result.durationSeconds > config.maxDurationSec) {
-      throw new CircuitBreakerError("timeout", result.durationSeconds, config.maxDurationSec);
-    }
-    return result;
-  } catch (error2) {
-    if (error2 instanceof CircuitBreakerError || error2 instanceof UpstreamError) {
-      throw error2;
-    }
-    if (isHttpError(error2) && (error2.status === 429 || error2.status >= 500)) {
-      throw new UpstreamError(error2.status);
-    }
-    throw error2;
-  }
-}
-function isHttpError(error2) {
-  return typeof error2 === "object" && error2 !== null && "status" in error2 && typeof error2.status === "number";
-}
-var init_circuit_breaker = __esm({
-  "src/circuit-breaker.ts"() {
-    "use strict";
-    init_dist();
-  }
-});
-
-// src/runner.ts
-var runner_exports = {};
-__export(runner_exports, {
-  runMonteCarloSimulation: () => runMonteCarloSimulation
-});
-async function runMonteCarloSimulation(config, executeAgent2) {
-  const run1Result = await executeWithCircuitBreaker(config, executeAgent2);
-  run1Result.runNumber = 1;
-  const remainingRuns = config.numRuns - 1;
-  if (remainingRuns <= 0) {
-    return [run1Result];
-  }
-  const parallelResults = await Promise.all(
-    Array.from({ length: remainingRuns }, async (_, i) => {
-      const runNumber = i + 2;
-      const result = await executeAgent2(config.agentCommand, config.prompt);
-      result.runNumber = runNumber;
-      return result;
-    })
-  );
-  return [run1Result, ...parallelResults];
-}
-var init_runner = __esm({
-  "src/runner.ts"() {
-    "use strict";
-    init_circuit_breaker();
-  }
-});
-
-// src/integrations.ts
-var integrations_exports = {};
-__export(integrations_exports, {
-  buildFailNotification: () => buildFailNotification,
-  createAnomalyTicket: () => createAnomalyTicket,
-  sendSlackNotification: () => sendSlackNotification
-});
-async function sendSlackNotification(url, blocks) {
-  try {
-    const response = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ blocks })
-    });
-    return response.ok;
-  } catch {
-    return false;
-  }
-}
-function buildFailNotification(repoName, prId, agentName, medianCost, baselineCost, zScore, prUrl) {
-  const percentage = ((medianCost - baselineCost) / baselineCost * 100).toFixed(1);
-  return [
-    {
-      type: "header",
-      text: { type: "plain_text", text: "AgentTest: Cost Anomaly Blocked", emoji: true }
-    },
-    {
-      type: "section",
-      text: {
-        type: "mrkdwn",
-        text: `*Repository:* ${repoName}
-*PR:* #${prId}
-*Agent:* ${agentName}
-*Spike:* ${percentage}% increase detected.`
-      }
-    },
-    {
-      type: "section",
-      fields: [
-        { type: "mrkdwn", text: `*Baseline Cost:*
-$${baselineCost.toFixed(4)}` },
-        { type: "mrkdwn", text: `*New Cost:*
-$${medianCost.toFixed(4)}` },
-        { type: "mrkdwn", text: `*Z-Score:*
-${zScore.toFixed(2)}` }
-      ]
-    },
-    {
-      type: "actions",
-      elements: [
-        {
-          type: "button",
-          text: { type: "plain_text", text: "View Pull Request" },
-          url: prUrl,
-          style: "danger"
-        }
-      ]
-    }
-  ];
-}
-async function createAnomalyTicket(settings, repoName, prId, agentName, zScore, medianCost, baselineMean) {
-  const auth2 = Buffer.from(`${settings.email}:${settings.apiToken}`).toString("base64");
-  const url = `https://${settings.domain}/rest/api/2/issue`;
-  const body = {
-    fields: {
-      project: { key: settings.projectKey },
-      summary: `Cost Anomaly Blocked: ${agentName} in ${repoName} (#${prId})`,
-      description: `AgentTest detected a financial regression.
-
-*Agent*: ${agentName}
-*Z-Score*: ${zScore.toFixed(2)}
-*Baseline*: $${baselineMean.toFixed(4)}
-*New Cost*: $${medianCost.toFixed(4)}
-
-This PR has been blocked automatically. To override, an authorized executive must comment \`/agenttest-override\` on the PR.`,
-      issuetype: { name: "Bug" }
-    }
-  };
-  try {
-    const response = await fetch(url, {
-      method: "POST",
-      headers: {
-        Authorization: `Basic ${auth2}`,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify(body)
-    });
-    if (!response.ok) {
-      return null;
-    }
-    const data = await response.json();
-    if (!data.key) return null;
-    return data.key;
-  } catch {
-    return null;
-  }
-}
-var init_integrations = __esm({
-  "src/integrations.ts"() {
-    "use strict";
   }
 });
 
@@ -25794,160 +25764,394 @@ function getOctokit(token, options, ...additionalPlugins) {
   return new GitHubWithPlugins(getOctokitOptions(token, options));
 }
 
-// src/agent-executor.ts
-import { execFile } from "node:child_process";
-async function executeAgent(command, prompt) {
-  const startTime = Date.now();
+// ../core/dist/agent-executor.js
+import { exec as exec2 } from "node:child_process";
+
+// ../shared/dist/types.js
+var DEFAULT_CONFIG = {
+  maxTokensPerRun: 5e5,
+  maxTokensPerEvaluation: 1e6,
+  maxDurationSec: 300,
+  numRuns: 5,
+  maxConcurrency: 2
+};
+var CircuitBreakerError = class extends Error {
+  type;
+  actual;
+  limit;
+  constructor(type, actual, limit) {
+    super(type === "token_cap" ? `Hard cap exceeded: ${actual} tokens (limit: ${limit})` : `Timeout exceeded: ${actual.toFixed(1)}s (limit: ${limit}s)`);
+    this.type = type;
+    this.actual = actual;
+    this.limit = limit;
+    this.name = "CircuitBreakerError";
+  }
+};
+var UpstreamError = class extends Error {
+  statusCode;
+  constructor(statusCode) {
+    super(`Upstream LLM provider unavailable (HTTP ${statusCode})`);
+    this.statusCode = statusCode;
+    this.name = "UpstreamError";
+  }
+};
+
+// ../shared/dist/hmac.js
+import crypto2 from "node:crypto";
+function signPayload(payload, apiKey) {
+  return crypto2.createHmac("sha256", apiKey).update(JSON.stringify(payload)).digest("hex");
+}
+function createSignedBody(payload, apiKey) {
+  return {
+    ...payload,
+    signature: signPayload(payload, apiKey)
+  };
+}
+
+// ../core/dist/collector.js
+import { randomBytes, timingSafeEqual } from "node:crypto";
+import { createServer } from "node:http";
+var MAX_BODY_BYTES = 16 * 1024;
+var ALLOWED_FIELDS = /* @__PURE__ */ new Set([
+  "schemaVersion",
+  "provider",
+  "modelId",
+  "promptTokens",
+  "completionTokens",
+  "toolCalls",
+  "retries",
+  "durationMs"
+]);
+var PROVIDERS = /* @__PURE__ */ new Set(["openai", "anthropic", "bedrock", "openai-compatible", "manual"]);
+function validateUsageEvent(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("Usage event must be a JSON object");
+  }
+  const event = value;
+  for (const field of Object.keys(event)) {
+    if (!ALLOWED_FIELDS.has(field))
+      throw new Error(`Usage event field is not allowed: ${field}`);
+  }
+  if (event["schemaVersion"] !== 1)
+    throw new Error("schemaVersion must be 1");
+  if (typeof event["provider"] !== "string" || !PROVIDERS.has(event["provider"])) {
+    throw new Error("provider is not supported");
+  }
+  if (typeof event["modelId"] !== "string" || event["modelId"].length < 1 || event["modelId"].length > 100) {
+    throw new Error("modelId must be 1-100 characters");
+  }
+  for (const field of ["promptTokens", "completionTokens"]) {
+    if (!isNonNegativeInteger(event[field]))
+      throw new Error(`${field} must be a non-negative integer`);
+  }
+  for (const field of ["toolCalls", "retries", "durationMs"]) {
+    if (event[field] !== void 0 && !isNonNegativeInteger(event[field])) {
+      throw new Error(`${field} must be a non-negative integer`);
+    }
+  }
+  return event;
+}
+async function startLocalCollector(onEvent) {
+  const token = randomBytes(32).toString("base64url");
+  const events2 = [];
+  const server = createServer((request2, response) => void handleRequest(request2, response, token, events2, onEvent));
+  await new Promise((resolve2, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => resolve2());
+  });
+  const address = server.address();
+  if (!address || typeof address === "string")
+    throw new Error("Local collector failed to bind");
+  return {
+    url: `http://127.0.0.1:${address.port}`,
+    token,
+    events: events2,
+    close: () => new Promise((resolve2, reject) => server.close((error2) => error2 ? reject(error2) : resolve2()))
+  };
+}
+async function handleRequest(request2, response, token, events2, onEvent) {
+  response.setHeader("Content-Type", "application/json");
+  response.setHeader("Cache-Control", "no-store");
+  if (request2.method !== "POST" || request2.url !== "/v1/usage")
+    return send(response, 404, { error: "Not found" });
+  const auth2 = request2.headers.authorization;
+  if (!auth2?.startsWith("Bearer ") || !safeEqual(auth2.slice(7), token)) {
+    return send(response, 401, { error: "Unauthorized" });
+  }
+  if (!request2.headers["content-type"]?.toLowerCase().startsWith("application/json")) {
+    return send(response, 415, { error: "Content-Type must be application/json" });
+  }
+  try {
+    const body = await readBody(request2);
+    const event = validateUsageEvent(JSON.parse(body));
+    events2.push(event);
+    onEvent?.(event);
+    send(response, 202, { accepted: true });
+  } catch (error2) {
+    send(response, 400, { error: error2 instanceof Error ? error2.message : "Invalid usage event" });
+  }
+}
+function readBody(request2) {
   return new Promise((resolve2, reject) => {
-    const parts = command.split(" ");
-    const executable = parts[0];
-    const args = [...parts.slice(1), "--prompt", prompt, "--agenttest-output", "json"];
-    execFile(executable, args, {
-      timeout: 6e5,
-      // 10 min hard kill (circuit breaker handles logical timeout)
-      maxBuffer: 10 * 1024 * 1024,
-      // 10MB stdout buffer
-      shell: true,
-      env: {
-        ...process.env,
-        AGENTTEST_MODE: "true",
-        AGENTTEST_OUTPUT_FORMAT: "json"
-      }
-    }, (error2, stdout, stderr) => {
-      const durationSeconds = (Date.now() - startTime) / 1e3;
-      if (error2 && !stdout) {
-        const statusMatch = stderr?.match(/HTTP\s+(\d{3})/i);
-        if (statusMatch) {
-          const status = Number(statusMatch[1]);
-          const httpError = Object.assign(new Error(error2.message), { status });
-          reject(httpError);
-          return;
-        }
-        reject(error2);
+    const chunks = [];
+    let bytes = 0;
+    request2.on("data", (chunk) => {
+      bytes += chunk.length;
+      if (bytes > MAX_BODY_BYTES) {
+        reject(new Error("Usage event exceeds 16 KiB"));
+        request2.destroy();
         return;
       }
-      try {
-        const output = parseAgentOutput(stdout);
-        const usageBreakdown = output.usage.map((u) => ({
-          modelId: u.model,
-          promptTokens: u.prompt_tokens,
-          completionTokens: u.completion_tokens
-        }));
-        resolve2({
-          runNumber: 0,
-          // Set by the runner
-          usageBreakdown,
-          totalToolCalls: output.tool_calls ?? 0,
-          durationSeconds
-        });
-      } catch (parseError) {
-        reject(
-          new Error(
-            `Failed to parse agent output as JSON. Agent must print a JSON object with "usage" array to stdout.
-Received: ${stdout.slice(0, 500)}
-Error: ${parseError instanceof Error ? parseError.message : "Unknown"}`
-          )
-        );
-      }
+      chunks.push(chunk);
+    });
+    request2.on("end", () => resolve2(Buffer.concat(chunks).toString("utf8")));
+    request2.on("error", reject);
+  });
+}
+function safeEqual(left, right) {
+  const a = Buffer.from(left);
+  const b = Buffer.from(right);
+  return a.length === b.length && timingSafeEqual(a, b);
+}
+function isNonNegativeInteger(value) {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+function send(response, status, body) {
+  response.statusCode = status;
+  response.end(JSON.stringify(body));
+}
+
+// ../core/dist/agent-executor.js
+async function executeAgent(command, prompt, signal, maxTokens) {
+  const startedAt = Date.now();
+  const executionController = new AbortController();
+  const executionSignal = signal ? AbortSignal.any([signal, executionController.signal]) : executionController.signal;
+  let collectedTokens = 0;
+  let observedTokenCap;
+  const collector = await startLocalCollector((event) => {
+    collectedTokens += event.promptTokens + event.completionTokens;
+    if (maxTokens !== void 0 && collectedTokens > maxTokens) {
+      observedTokenCap = collectedTokens;
+      executionController.abort("token_cap");
+    }
+  });
+  try {
+    const { stdout } = await execute(command, executionSignal, {
+      ...process.env,
+      AGENTTEST_MODE: "true",
+      AGENTTEST_PROMPT: prompt,
+      AGENTTEST_COLLECTOR_URL: collector.url,
+      AGENTTEST_COLLECTOR_TOKEN: collector.token
+    });
+    if (collector.events.length > 0) {
+      const usageBreakdown = collector.events.map((event) => ({
+        modelId: event.modelId,
+        promptTokens: event.promptTokens,
+        completionTokens: event.completionTokens
+      }));
+      return {
+        runNumber: 0,
+        usageBreakdown,
+        totalToolCalls: collector.events.reduce((total, event) => total + (event.toolCalls ?? 0), 0),
+        durationSeconds: (Date.now() - startedAt) / 1e3
+      };
+    }
+    const output = parseLegacyOutput(stdout);
+    return {
+      runNumber: 0,
+      usageBreakdown: output.usage.map((usage) => ({
+        modelId: usage.model,
+        promptTokens: usage.prompt_tokens,
+        completionTokens: usage.completion_tokens
+      })),
+      totalToolCalls: output.tool_calls ?? 0,
+      durationSeconds: (Date.now() - startedAt) / 1e3
+    };
+  } catch (error2) {
+    if (observedTokenCap !== void 0 && maxTokens !== void 0) {
+      throw new CircuitBreakerError("token_cap", observedTokenCap, maxTokens);
+    }
+    const processError = error2;
+    const status = processError.stderr?.match(/HTTP\s+(\d{3})/i)?.[1];
+    if (status)
+      throw Object.assign(new Error(processError.message), { status: Number(status) });
+    throw error2;
+  } finally {
+    await collector.close();
+  }
+}
+function execute(command, signal, env) {
+  return new Promise((resolve2, reject) => {
+    exec2(command, { env, signal, timeout: 6e5, maxBuffer: 10 * 1024 * 1024 }, (error2, stdout, stderr) => {
+      if (error2)
+        return reject(Object.assign(error2, { stderr }));
+      resolve2({ stdout, stderr });
     });
   });
 }
-function parseAgentOutput(stdout) {
-  try {
-    const parsed = JSON.parse(stdout.trim());
-    validateAgentOutput(parsed);
-    return parsed;
-  } catch {
-  }
-  const jsonMatch = stdout.match(/\{[\s\S]*\}/g);
-  if (!jsonMatch) {
-    throw new Error("No JSON object found in agent output");
-  }
-  for (let i = jsonMatch.length - 1; i >= 0; i--) {
+function parseLegacyOutput(stdout) {
+  const candidates = [stdout.trim(), ...(stdout.match(/\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}/g) ?? []).reverse()];
+  for (const candidate of candidates) {
     try {
-      const parsed = JSON.parse(jsonMatch[i]);
-      validateAgentOutput(parsed);
+      const parsed = JSON.parse(candidate);
+      validateLegacyOutput(parsed);
       return parsed;
     } catch {
-      continue;
     }
   }
-  throw new Error("No valid AgentTest JSON output found in agent stdout");
+  throw new Error("No usage telemetry was received. Instrument the agent with @agenttest/sdk or emit the deprecated native AgentTest JSON usage object.");
 }
-function validateAgentOutput(output) {
-  if (!output.usage || !Array.isArray(output.usage)) {
-    throw new Error('Agent output must contain a "usage" array');
-  }
+function validateLegacyOutput(output) {
+  if (!Array.isArray(output.usage) || output.usage.length === 0)
+    throw new Error("usage must be a non-empty array");
   for (const entry of output.usage) {
-    if (!entry.model || typeof entry.prompt_tokens !== "number" || typeof entry.completion_tokens !== "number") {
-      throw new Error(
-        'Each usage entry must have "model" (string), "prompt_tokens" (number), and "completion_tokens" (number)'
-      );
+    if (typeof entry.model !== "string" || entry.model.length === 0 || !Number.isSafeInteger(entry.prompt_tokens) || entry.prompt_tokens < 0 || !Number.isSafeInteger(entry.completion_tokens) || entry.completion_tokens < 0) {
+      throw new Error("invalid usage entry");
     }
+  }
+  if (output.tool_calls !== void 0 && (!Number.isSafeInteger(output.tool_calls) || output.tool_calls < 0)) {
+    throw new Error("tool_calls must be a non-negative integer");
   }
 }
 
-// src/config.ts
-init_dist();
+// ../core/dist/circuit-breaker.js
+async function executeWithCircuitBreaker(config, executeAgent2, cancellationSignal) {
+  const timeoutController = new AbortController();
+  const timeout = setTimeout(() => timeoutController.abort("timeout"), config.maxDurationSec * 1e3);
+  timeout.unref?.();
+  const signal = cancellationSignal ? AbortSignal.any([cancellationSignal, timeoutController.signal]) : timeoutController.signal;
+  try {
+    const execution = executeAgent2(config.agentCommand, config.prompt, signal, config.maxTokensPerRun).catch((error2) => {
+      if (error2 instanceof CircuitBreakerError)
+        throw error2;
+      if (timeoutController.signal.aborted) {
+        throw new CircuitBreakerError("timeout", config.maxDurationSec, config.maxDurationSec);
+      }
+      if (cancellationSignal?.aborted)
+        throw new Error("Agent execution cancelled");
+      throw error2;
+    });
+    const result = await Promise.race([
+      execution,
+      new Promise((_, reject) => signal.addEventListener("abort", () => {
+        reject(timeoutController.signal.aborted ? new CircuitBreakerError("timeout", config.maxDurationSec, config.maxDurationSec) : new Error("Agent execution cancelled"));
+      }, { once: true }))
+    ]);
+    const tokens = countRunTokens(result);
+    if (tokens > config.maxTokensPerRun) {
+      throw new CircuitBreakerError("token_cap", tokens, config.maxTokensPerRun);
+    }
+    if (result.durationSeconds > config.maxDurationSec) {
+      throw new CircuitBreakerError("timeout", result.durationSeconds, config.maxDurationSec);
+    }
+    return result;
+  } catch (error2) {
+    if (error2 instanceof CircuitBreakerError || error2 instanceof UpstreamError)
+      throw error2;
+    if (isHttpError(error2) && (error2.status === 429 || error2.status >= 500)) {
+      throw new UpstreamError(error2.status);
+    }
+    throw error2;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+function countRunTokens(result) {
+  return result.usageBreakdown.reduce((sum, usage) => sum + usage.promptTokens + usage.completionTokens, 0);
+}
+function isHttpError(error2) {
+  return typeof error2 === "object" && error2 !== null && "status" in error2 && typeof error2.status === "number";
+}
+
+// ../core/dist/config.js
 import { readFileSync as readFileSync2 } from "node:fs";
 function loadConfig(configPath) {
   let raw;
   try {
-    const content = readFileSync2(configPath, "utf8");
-    raw = parseSimpleYaml(content);
+    raw = parseSimpleYaml(readFileSync2(configPath, "utf8"));
   } catch {
     throw new Error(`Cannot read config file: ${configPath}`);
   }
-  if (!raw.agent?.command) {
+  if (!raw.agent?.command)
     throw new Error("agenttest.config.yml: agent.command is required");
-  }
-  if (!raw.agent?.prompt) {
+  if (!raw.agent?.prompt)
     throw new Error("agenttest.config.yml: agent.prompt is required");
-  }
-  return {
+  const config = {
+    agentName: raw.agent.name ?? "default",
     agentCommand: raw.agent.command,
     prompt: raw.agent.prompt,
     maxTokensPerRun: raw.limits?.max_tokens_per_run ?? DEFAULT_CONFIG.maxTokensPerRun,
+    maxTokensPerEvaluation: raw.limits?.max_tokens_per_evaluation ?? DEFAULT_CONFIG.maxTokensPerEvaluation,
     maxDurationSec: raw.limits?.max_duration_sec ?? DEFAULT_CONFIG.maxDurationSec,
     numRuns: raw.limits?.num_runs ?? DEFAULT_CONFIG.numRuns,
+    maxConcurrency: raw.limits?.max_concurrency ?? DEFAULT_CONFIG.maxConcurrency,
     apiEndpoint: raw.server?.endpoint ?? "https://api.agenttest.dev",
     overrideUsers: raw.override?.authorized_users ?? [],
     agentFramework: raw.agent?.framework,
     primaryModel: raw.agent?.primary_model
   };
+  validateConfig(config);
+  return config;
+}
+function validateConfig(config) {
+  const positiveIntegers = [
+    ["limits.max_tokens_per_run", config.maxTokensPerRun],
+    ["limits.max_tokens_per_evaluation", config.maxTokensPerEvaluation],
+    ["limits.max_duration_sec", config.maxDurationSec],
+    ["limits.num_runs", config.numRuns],
+    ["limits.max_concurrency", config.maxConcurrency]
+  ];
+  for (const [name, value] of positiveIntegers) {
+    if (!Number.isInteger(value) || (value ?? 0) <= 0) {
+      throw new Error(`agenttest.config.yml: ${name} must be a positive integer`);
+    }
+  }
+  if (config.numRuns > 100)
+    throw new Error("agenttest.config.yml: limits.num_runs cannot exceed 100");
+  if (!config.agentName || !/^[A-Za-z0-9_.-]{1,100}$/.test(config.agentName)) {
+    throw new Error("agenttest.config.yml: agent.name must be 1-100 letters, numbers, dots, underscores, or hyphens");
+  }
+  if ((config.maxConcurrency ?? 1) > config.numRuns) {
+    throw new Error("agenttest.config.yml: limits.max_concurrency cannot exceed limits.num_runs");
+  }
+  let endpoint2;
+  try {
+    endpoint2 = new URL(config.apiEndpoint);
+  } catch {
+    throw new Error("agenttest.config.yml: server.endpoint must be a valid URL");
+  }
+  const local = endpoint2.hostname === "localhost" || endpoint2.hostname === "127.0.0.1";
+  if (endpoint2.protocol !== "https:" && !(local && endpoint2.protocol === "http:")) {
+    throw new Error("agenttest.config.yml: server.endpoint must use HTTPS (HTTP is allowed only locally)");
+  }
 }
 function parseSimpleYaml(content) {
   const result = {};
   let currentSection = "";
   for (const line of content.split("\n")) {
     const trimmed = line.trimEnd();
-    if (!trimmed || trimmed.startsWith("#")) continue;
+    if (!trimmed || trimmed.trimStart().startsWith("#"))
+      continue;
     if (!trimmed.startsWith(" ") && !trimmed.startsWith("-") && trimmed.endsWith(":")) {
       currentSection = trimmed.slice(0, -1).trim();
       result[currentSection] = result[currentSection] ?? {};
       continue;
     }
-    const kvMatch = trimmed.match(/^\s+(\w+):\s*(.*)$/);
-    if (kvMatch) {
-      const [, key, rawValue] = kvMatch;
-      if (!key || !currentSection) continue;
-      const value = rawValue?.trim();
-      if (!value) {
-        result[currentSection][key] = [];
+    const keyValue = trimmed.match(/^\s+([\w_]+):\s*(.*)$/);
+    if (keyValue) {
+      const [, key, rawValue] = keyValue;
+      if (!key || !currentSection)
         continue;
-      }
-      const parsed = parseYamlValue(value);
-      result[currentSection][key] = parsed;
+      const value = rawValue?.trim();
+      result[currentSection][key] = value ? parseYamlValue(value) : [];
       continue;
     }
-    const arrayMatch = trimmed.match(/^\s+-\s+(.+)$/);
-    if (arrayMatch && currentSection) {
-      const value = arrayMatch[1]?.trim();
-      const sectionObj = result[currentSection];
-      const lastArrayKey = Object.keys(sectionObj).reverse().find((k) => Array.isArray(sectionObj[k]));
-      if (lastArrayKey && Array.isArray(sectionObj[lastArrayKey])) {
-        sectionObj[lastArrayKey].push(value);
-      }
+    const item = trimmed.match(/^\s+-\s+(.+)$/);
+    if (item && currentSection) {
+      const section = result[currentSection];
+      const arrayKey = Object.keys(section).reverse().find((key) => Array.isArray(section[key]));
+      if (arrayKey)
+        section[arrayKey].push(item[1].trim());
     }
   }
   return {
@@ -25958,151 +26162,170 @@ function parseSimpleYaml(content) {
   };
 }
 function parseYamlValue(value) {
-  if (value.startsWith('"') && value.endsWith('"') || value.startsWith("'") && value.endsWith("'")) {
+  if (value.startsWith('"') && value.endsWith('"') || value.startsWith("'") && value.endsWith("'"))
     return value.slice(1, -1);
-  }
-  const num = Number(value);
-  if (!isNaN(num) && value !== "") return num;
-  if (value === "true") return true;
-  if (value === "false") return false;
+  const number = Number(value);
+  if (Number.isFinite(number) && value !== "")
+    return number;
+  if (value === "true")
+    return true;
+  if (value === "false")
+    return false;
   return value;
 }
 
-// src/index.ts
-init_dist();
+// ../core/dist/evaluate.js
 import { createHash } from "node:crypto";
-function buildEvaluationIdempotencyKey(repoId, prId, commitHash, agentName) {
-  const githubRunId = process.env["GITHUB_RUN_ID"] ?? "local";
-  const githubRunAttempt = process.env["GITHUB_RUN_ATTEMPT"] ?? "0";
-  const rawKey = `${repoId}:${prId}:${commitHash}:${agentName}:${githubRunId}:${githubRunAttempt}`;
-  return `eval_${createHash("sha256").update(rawKey).digest("hex")}`;
+
+// ../core/dist/runner.js
+async function runMonteCarloSimulation(config, executeAgent2) {
+  const cancellation = new AbortController();
+  const aggregateLimit = config.maxTokensPerEvaluation ?? config.maxTokensPerRun * config.numRuns;
+  const maxConcurrency = Math.max(1, Math.min(config.numRuns, Math.floor(config.maxConcurrency ?? 2)));
+  let aggregateTokens = 0;
+  const first = await executeWithCircuitBreaker(config, executeAgent2, cancellation.signal);
+  first.runNumber = 1;
+  aggregateTokens += countRunTokens(first);
+  if (aggregateTokens > aggregateLimit) {
+    cancellation.abort("aggregate_budget");
+    throw new CircuitBreakerError("token_cap", aggregateTokens, aggregateLimit);
+  }
+  if (config.numRuns === 1)
+    return [first];
+  const rest = new Array(config.numRuns - 1);
+  let nextRun = 2;
+  let firstError;
+  async function worker() {
+    while (!cancellation.signal.aborted) {
+      const runNumber = nextRun++;
+      if (runNumber > config.numRuns)
+        return;
+      try {
+        const result = await executeWithCircuitBreaker(config, executeAgent2, cancellation.signal);
+        result.runNumber = runNumber;
+        aggregateTokens += countRunTokens(result);
+        if (aggregateTokens > aggregateLimit) {
+          throw new CircuitBreakerError("token_cap", aggregateTokens, aggregateLimit);
+        }
+        rest[runNumber - 2] = result;
+      } catch (error2) {
+        firstError ??= error2;
+        cancellation.abort("run_failed");
+      }
+    }
+  }
+  await Promise.allSettled(Array.from({ length: Math.min(maxConcurrency, rest.length) }, () => worker()));
+  if (firstError)
+    throw firstError;
+  return [first, ...rest];
 }
+
+// ../core/dist/evaluate.js
+async function executeEvaluation(options) {
+  const { config, context: context3, serviceKey, executeAgent: executeAgent2 } = options;
+  if (!serviceKey)
+    throw new Error("AgentTest service key is required");
+  if (!/^\d+$/.test(context3.repositoryId))
+    throw new Error("repositoryId must be a positive numeric GitHub repository id");
+  if (!Number.isSafeInteger(context3.changeNumber) || context3.changeNumber <= 0) {
+    throw new Error("changeNumber must be a positive integer");
+  }
+  if (context3.commitSha.length < 7)
+    throw new Error("commitSha must be at least 7 characters");
+  options.progress?.(`Starting ${config.numRuns} cost-sampling runs`);
+  const runs = await runMonteCarloSimulation(config, executeAgent2);
+  options.progress?.(`Completed ${runs.length} cost-sampling runs`);
+  const unsigned = {
+    repoId: context3.repositoryId,
+    prId: context3.changeNumber,
+    commitHash: context3.commitSha,
+    agentName: config.agentName ?? "default",
+    runs,
+    idempotencyKey: buildIdempotencyKey(context3, config.agentName ?? "default"),
+    timestamp: (/* @__PURE__ */ new Date()).toISOString()
+  };
+  const request2 = createSignedBody(unsigned, serviceKey);
+  const response = await (options.fetchImpl ?? fetch)(`${config.apiEndpoint}/api/v1/evaluate`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${serviceKey}` },
+    body: JSON.stringify(request2)
+  });
+  const body = await response.json();
+  if (!response.ok) {
+    const message = typeof body.error === "string" ? body.error : `AgentTest API request failed with HTTP ${response.status}`;
+    throw new Error(message);
+  }
+  return { response: body, runs };
+}
+function buildIdempotencyKey(context3, agentName) {
+  const value = [
+    context3.repositoryId,
+    context3.changeNumber,
+    context3.commitSha,
+    agentName,
+    context3.runId,
+    context3.runAttempt
+  ].join(":");
+  return `eval_${createHash("sha256").update(value).digest("hex")}`;
+}
+
+// src/index.ts
 function shouldRun(triggerMode, pr, eventAction) {
-  if (!pr) {
-    return { run: false, reason: "No pull request context found" };
+  if (!pr) return { run: false, reason: "No pull request context found" };
+  if (triggerMode === "label") {
+    const hasLabel = pr.labels?.some((label) => label.name === "agenttest-run") ?? false;
+    return hasLabel ? { run: true, reason: 'Label trigger: "agenttest-run" found' } : { run: false, reason: 'PR does not have the "agenttest-run" label. Add the label to trigger AgentTest.' };
   }
-  switch (triggerMode) {
-    case "label": {
-      const hasLabel = pr.labels?.some((l) => l.name === "agenttest-run") ?? false;
-      if (!hasLabel) {
-        return { run: false, reason: 'PR does not have the "agenttest-run" label. Add the label to trigger AgentTest.' };
-      }
-      return { run: true, reason: 'Label trigger: "agenttest-run" found' };
-    }
-    case "ready": {
-      if (pr.draft) {
-        return { run: false, reason: 'PR is a draft. AgentTest will run when marked "Ready for Review".' };
-      }
-      return { run: true, reason: `PR is ready for review (event: ${eventAction ?? "unknown"})` };
-    }
-    case "always":
-    default:
-      return { run: true, reason: "trigger-mode: always" };
+  if (triggerMode === "ready") {
+    return pr.draft ? { run: false, reason: 'PR is a draft. AgentTest will run when marked "Ready for Review".' } : { run: true, reason: `PR is ready for review (event: ${eventAction ?? "unknown"})` };
   }
+  return { run: true, reason: "trigger-mode: always" };
 }
 async function run(core, github, loadConfigFn, executeAgentFn) {
   try {
-    const apiKey = core.getInput("api-key");
-    const configPath = core.getInput("config-path") || "./agenttest.config.yml";
-    const triggerMode = core.getInput("trigger-mode") || "always";
+    const configuredServiceKey = core.getInput("service-key");
+    const deprecatedApiKey = core.getInput("api-key");
+    const serviceKey = configuredServiceKey || deprecatedApiKey;
+    if (!configuredServiceKey && deprecatedApiKey) {
+      core.warning("AgentTest: api-key is deprecated; rename the workflow input to service-key.");
+    }
+    const config = loadConfigFn(core.getInput("config-path") || "./agenttest.config.yml");
     const pr = github.context.payload.pull_request;
-    const triggerCheck = shouldRun(triggerMode, pr, github.context.payload.action);
-    if (!triggerCheck.run) {
-      core.info(`AgentTest: Skipped \u2014 ${triggerCheck.reason}`);
+    const trigger = shouldRun(core.getInput("trigger-mode") || "always", pr, github.context.payload.action);
+    if (!trigger.run) {
+      core.info(`AgentTest: Skipped \u2014 ${trigger.reason}`);
       core.setOutput("status", "skipped");
       core.setOutput("median-cost", "0");
       core.setOutput("z-score", "0");
       return;
     }
-    core.info(`AgentTest: ${triggerCheck.reason}`);
-    const config = loadConfigFn(configPath);
-    core.info(`AgentTest: Loaded config for "${config.agentCommand}"`);
-    const { runMonteCarloSimulation: runMonteCarloSimulation2 } = await Promise.resolve().then(() => (init_runner(), runner_exports));
-    core.info(`AgentTest: Starting ${config.numRuns} Monte Carlo runs...`);
-    const runs = await runMonteCarloSimulation2(config, executeAgentFn);
-    core.info(`AgentTest: Completed ${runs.length} runs`);
-    if (!pr) {
-      core.warning("AgentTest: No pull request context found. Skipping.");
-      return;
-    }
-    const githubRepoId = github.context.payload.repository?.id;
-    if (!githubRepoId) {
-      throw new Error("GitHub repository id was not available in the workflow event payload");
-    }
-    const payloadBody = {
-      repoId: String(githubRepoId),
-      prId: pr.number,
-      commitHash: pr.head.sha,
-      agentName: config.agentCommand,
-      runs,
-      idempotencyKey: buildEvaluationIdempotencyKey(
-        String(githubRepoId),
-        pr.number,
-        pr.head.sha,
-        config.agentCommand
-      ),
-      timestamp: (/* @__PURE__ */ new Date()).toISOString()
-    };
-    const evaluateRequest = createSignedBody(payloadBody, apiKey);
-    core.info(`AgentTest: Submitting telemetry to ${config.apiEndpoint}...`);
-    const response = await fetch(`${config.apiEndpoint}/api/v1/evaluate`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${apiKey}`
+    if (!pr) throw new Error("Pull request context is required");
+    const repositoryId = github.context.payload.repository?.id;
+    if (!repositoryId) throw new Error("GitHub repository id was not available in the workflow event payload");
+    core.info(`AgentTest: ${trigger.reason}`);
+    const result = await executeEvaluation({
+      config,
+      serviceKey,
+      executeAgent: executeAgentFn,
+      context: {
+        repositoryId: String(repositoryId),
+        changeNumber: pr.number,
+        commitSha: pr.head.sha,
+        runId: process.env["GITHUB_RUN_ID"] ?? "local",
+        runAttempt: process.env["GITHUB_RUN_ATTEMPT"] ?? "1"
       },
-      body: JSON.stringify(evaluateRequest)
+      progress: (message) => core.info(`AgentTest: ${message}`)
     });
-    const responseBody = await response.json();
-    if (!response.ok) {
-      throw new Error(responseBody.error ?? `AgentTest API request failed with HTTP ${response.status}`);
-    }
-    const result = responseBody;
-    core.setOutput("status", result.status);
-    core.setOutput("median-cost", result.medianCost.toFixed(6));
-    core.setOutput("z-score", result.zScore.toFixed(2));
-    core.info(`AgentTest: Result \u2014 ${result.status} (Z=${result.zScore.toFixed(2)}, $${result.medianCost.toFixed(4)})`);
-    if (result.status === "fail") {
-      const prUrl = `https://github.com/${github.context.repo.owner}/${github.context.repo.repo}/pull/${pr.number}`;
-      const slackWebhook = core.getInput("slack-webhook");
-      if (slackWebhook) {
-        const { sendSlackNotification: sendSlackNotification2, buildFailNotification: buildFailNotification2 } = await Promise.resolve().then(() => (init_integrations(), integrations_exports));
-        const blocks = buildFailNotification2(
-          `${github.context.repo.owner}/${github.context.repo.repo}`,
-          pr.number,
-          config.agentCommand,
-          result.medianCost,
-          result.baselineMean,
-          result.zScore,
-          prUrl
-        );
-        const success = await sendSlackNotification2(slackWebhook, blocks);
-        if (success) core.info("AgentTest: Slack notification sent.");
-        else core.warning("AgentTest: Failed to send Slack notification.");
-      }
-      const jiraToken = core.getInput("jira-api-token");
-      const jiraEmail = core.getInput("jira-email");
-      const jiraDomain = core.getInput("jira-domain");
-      const jiraProject = core.getInput("jira-project-key");
-      if (jiraToken && jiraEmail && jiraDomain && jiraProject) {
-        const { createAnomalyTicket: createAnomalyTicket2 } = await Promise.resolve().then(() => (init_integrations(), integrations_exports));
-        const ticketKey = await createAnomalyTicket2(
-          { domain: jiraDomain, projectKey: jiraProject, email: jiraEmail, apiToken: jiraToken },
-          `${github.context.repo.owner}/${github.context.repo.repo}`,
-          pr.number,
-          config.agentCommand,
-          result.zScore,
-          result.medianCost,
-          result.baselineMean
-        );
-        if (ticketKey) core.info(`AgentTest: Jira ticket created: ${ticketKey}`);
-        else core.warning("AgentTest: Failed to create Jira ticket.");
-      }
-      core.setFailed(result.message);
-    }
+    const evaluation = result.response;
+    core.setOutput("status", evaluation.status);
+    core.setOutput("median-cost", evaluation.medianCost.toFixed(6));
+    core.setOutput("z-score", evaluation.zScore.toFixed(2));
+    core.info(
+      `AgentTest: Result \u2014 ${evaluation.status} (Z=${evaluation.zScore.toFixed(2)}, $${evaluation.medianCost.toFixed(4)})`
+    );
+    if (evaluation.status === "fail") core.setFailed(evaluation.message);
   } catch (error2) {
-    const message = error2 instanceof Error ? error2.message : "Unknown error";
-    core.setFailed(`AgentTest: ${message}`);
+    core.setFailed(`AgentTest: ${error2 instanceof Error ? error2.message : "Unknown error"}`);
   }
 }
 

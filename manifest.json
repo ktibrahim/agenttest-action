@@ -1,27 +1,27 @@
 {
-  "generatedAt": "2026-06-03T20:25:03.806Z",
+  "generatedAt": "2026-08-25T19:53:19.728Z",
   "source": "packages/action",
-  "purpose": "Public GitHub Marketplace Action thin-client release bundle",
+  "purpose": "Direct-install GitHub Action thin-client release bundle; no Marketplace listing",
   "files": {
     "LICENSE": {
       "bytes": 298,
       "sha256": "84e6cb28665b357a3486beb93b778b8fd417bc8dd3698d1c323987cfed8304f4"
     },
     "README.md": {
-      "bytes": 2771,
-      "sha256": "64da4bf3784a2c52510ce3f1b4c6729ee2131b38687500a29385ed4e7087102a"
+      "bytes": 2845,
+      "sha256": "3c7ddc62def9d670a385fef3b5d598db50a0c1ca4b4d9894a43cd8d0ab347423"
     },
     "RELEASE_NOTES.md": {
-      "bytes": 308,
-      "sha256": "c6fc7bf7022ca34eab706e27f54239ff1cc16947d1db954f8e0423785e9a1081"
+      "bytes": 559,
+      "sha256": "26616092319a343515aad91521506c20d9b8791ee7d57effce0e267e6e7a2dee"
     },
     "action.yml": {
-      "bytes": 1308,
-      "sha256": "35d8db78eea3dbec7788c7432d99d457ed867ea17a7c2ed937c71940fbb3658a"
+      "bytes": 1033,
+      "sha256": "8d3ddb0c00ceaae6daee1703c8cfeaf44d0363f316d6c1dd7ba5bd086561b248"
     },
     "dist/index.js": {
-      "bytes": 1055881,
-      "sha256": "f9283a69e8f7c20afa51ee801d09fc543921138551341c1fff2c2edae59d6ffc"
+      "bytes": 1067273,
+      "sha256": "40db0b0862a3f79fe0e885ef5c7a4d25a74e5bea6208b5bba3e32bc7c7776063"
     }
   },
   "boundary": {
